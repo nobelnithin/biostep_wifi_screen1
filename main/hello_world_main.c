@@ -8,6 +8,15 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
+#include "esp_timer.h"
+
+
+static TimerHandle_t no_device_timer;  // Timer handle
+static TimerHandle_t disconnect_timer;
+
+#define NO_DEVICE_TIMEOUT 60000  // 2 minutes in milliseconds
+
+
 
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b)) 
@@ -17,6 +26,44 @@ static const char *TAG = "ESP32_AP";
 char model_number[] = "BIOSTEP-2025";
 char serial_number[] = "SN1234567890";
 int battery_level = 65; // start at 75%
+
+
+
+
+void disconnect_timer_callback(TimerHandle_t xTimer)
+{
+
+    ESP_LOGI(TAG, "Stopping Wi-Fi as no device connected within timeout");
+    esp_wifi_stop();
+        // wifi_started = false;
+    
+}
+
+
+void no_device_timer_callback(TimerHandle_t xTimer)
+{
+   
+    ESP_LOGI(TAG, "Stopping Wi-Fi as no device connected within timeout");
+    esp_wifi_stop();
+        // wifi_started = false;
+        
+   
+
+}
+
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+        ESP_LOGI(TAG, "Station connected");
+        xTimerStop(no_device_timer, 0);  // Stop the timer if a device connects
+    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        ESP_LOGI(TAG, "Station disconnected");
+        disconnect_timer = xTimerCreate("DisconnectDeviceTimer", pdMS_TO_TICKS(20000), pdFALSE, NULL, disconnect_timer_callback);
+        xTimerStart(disconnect_timer, 0); // Station Disconnected, thus timer start again
+    }
+}
+
 
 
 esp_err_t update_post_handler(httpd_req_t *req) {
@@ -83,6 +130,16 @@ esp_err_t info_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+esp_err_t angle_get_handler(httpd_req_t *req) {
+    char response[128];
+    snprintf(response, sizeof(response),
+             "{\"%s\", \" %s\"}",
+             roll, pitch);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, strlen(response));
+    return ESP_OK;
+}
+
 esp_err_t battery_get_handler(httpd_req_t *req) {
     battery_level = (battery_level + 1) % 100;  // Simulate battery
     char response[32];
@@ -107,6 +164,11 @@ httpd_handle_t start_webserver(void) {
             .method = HTTP_GET,
             .handler = battery_get_handler
         };
+                httpd_uri_t angle_uri = {
+            .uri = "/wristAngle",
+            .method = HTTP_GET,
+            .handler = angle_get_handler
+        };
         httpd_uri_t update_uri = {
         .uri = "/update",
         .method = HTTP_POST,
@@ -114,6 +176,7 @@ httpd_handle_t start_webserver(void) {
         };
         httpd_register_uri_handler(server, &info_uri);
         httpd_register_uri_handler(server, &battery_uri);
+        httpd_register_uri_handler(server, &angle_uri);
         httpd_register_uri_handler(server, &update_uri);
     }
     return server;
@@ -127,6 +190,8 @@ void wifi_init_softap(void) {
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
 
     wifi_config_t wifi_config = {
         .ap = {
@@ -142,6 +207,9 @@ void wifi_init_softap(void) {
     esp_wifi_start();
 
     ESP_LOGI(TAG, "Wi-Fi AP started. SSID: Biostep+");
+
+    no_device_timer = xTimerCreate("NoDeviceTimer", pdMS_TO_TICKS(NO_DEVICE_TIMEOUT), pdFALSE, NULL, no_device_timer_callback);
+    xTimerStart(no_device_timer, 0);
 }
 
 void app_main(void) {
